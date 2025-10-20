@@ -1,129 +1,40 @@
 import os
-import json
+import segmentation_models_pytorch as smp
+import torch
 import glob
 import cv2
-import numpy as np
-import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader, TensorDataset
-import segmentation_models_pytorch as smp
+import json
 from shapely.geometry import Polygon
+import numpy as np
 from typing import List, Tuple
 
-# Class mapping
-CLASS_MAP = {
-    "individual_tree": 1,
-    "group_of_trees": 2
-}
+# Quick inference example
+output_dir = '../outputs/'
+os.makedirs(output_dir, exist_ok=True)
 
-# Load images and generate multi-class integer masks from JSON polygons
-def load_images_and_masks(img_dir_pattern, json_path):
-    with open(json_path, "r") as f:
-        data = json.load(f)
-
-    imgs = []
-    masks = []
-
-    for item in data["images"]:
-        file_name = item["file_name"]
-        img_path = os.path.join(os.path.dirname(img_dir_pattern), file_name)
-
-        # Load image and normalize
-        img = cv2.cvtColor(cv2.imread(img_path), cv2.COLOR_BGR2RGB) / 255.0
-        h, w = img.shape[:2]
-
-        # Initialize integer mask (H,W), 0=background
-        mask = np.zeros((h, w), dtype=np.uint8)
-
-        # Fill polygons by class in priority order: individual_tree first, group_of_trees second
-        for cls_name in ["individual_tree", "group_of_trees"]:
-            for ann in item.get("annotations", []):
-                if ann["class"] != cls_name:
-                    continue
-                cls_id = CLASS_MAP[cls_name]
-                poly = np.array(ann["segmentation"], dtype=np.int32).reshape(-1, 2)
-                cv2.fillPoly(mask, [poly], cls_id)
-
-        imgs.append(img)
-        masks.append(mask)
-
-    X = torch.tensor(np.stack(imgs)).permute(0,3,1,2).float()  # (N,3,H,W)
-    y = torch.tensor(np.stack(masks)).long()                   # (N,H,W) int64
-    return X, y
-
-# Paths
-train_images_path = '../data/train/images/*.tif'
-train_masks_path  = '../data/train/masks/train_annotations.json'
-val_images_path   = '../data/val/images/*.tif'
-val_masks_path    = '../data/val/masks/sample_answer.json'
-
-
-# Load dataset
-X_train, y_train = load_images_and_masks(train_images_path, train_masks_path)
-X_val, y_val     = load_images_and_masks(val_images_path, val_masks_path)
-
-train_dataset = TensorDataset(X_train, y_train)
-val_dataset   = TensorDataset(X_val, y_val)
-
-train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True)
-val_loader   = DataLoader(val_dataset, batch_size=4)
-
-# Model setup
 model = smp.Unet(
     encoder_name='resnet50',
-    encoder_weights='imagenet',
+    encoder_weights=None,
     in_channels=3,
-    classes=3   # 0=background, 1=individual_tree, 2=group_of_trees
+    classes=3
 ).cuda()
 
-criterion = nn.CrossEntropyLoss()
-optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+# Load the saved weights
+model.load_state_dict(torch.load("../checkpoints/unet_resnet50_weights.pth"))
 
-# Training loop
-num_epochs = 5
-for epoch in range(num_epochs):
-    model.train()
-    train_loss = 0
-    for imgs, masks in train_loader:
-        imgs, masks = imgs.cuda(), masks.cuda()
-        optimizer.zero_grad()
-        logits = model(imgs)           # (B,3,H,W)
-        loss = criterion(logits, masks)
-        loss.backward()
-        optimizer.step()
-        train_loss += loss.item()
-    train_loss /= len(train_loader)
+model.eval()
+test_image_paths = sorted(glob.glob('../data/val/images/*.tif'))
 
-    # Validation
-    model.eval()
-    val_loss = 0
-    with torch.no_grad():
-        for imgs, masks in val_loader:
-            imgs, masks = imgs.cuda(), masks.cuda()
-            logits = model(imgs)
-            loss = criterion(logits, masks)
-            val_loss += loss.item()
-    val_loss /= len(val_loader)
+with torch.no_grad():
+    for path in test_image_paths:
+        img = cv2.imread(path)[:, :, ::-1] / 255.0
+        img_tensor = torch.tensor(img).permute(2,0,1).unsqueeze(0).float().cuda()
+        logits = model(img_tensor)
+        pred = torch.argmax(logits, dim=1)[0].cpu().numpy().astype(np.uint8)  # (H,W)
 
-    print(f"Epoch {epoch+1}/{num_epochs} - Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}")
-
-# Quick inference example
-# output_dir = 'outputs/'
-# os.makedirs(output_dir, exist_ok=True)
-
-# model.eval()
-# test_image_paths = sorted(glob.glob('../data/val/images/*.tif'))
-
-# with torch.no_grad():
-#     for path in test_image_paths:
-#         img = cv2.imread(path)[:, :, ::-1] / 255.0
-#         img_tensor = torch.tensor(img).permute(2,0,1).unsqueeze(0).float().cuda()
-#         logits = model(img_tensor)
-#         pred = torch.argmax(logits, dim=1)[0].cpu().numpy().astype(np.uint8)  # (H,W)
-
-#         # Save mask (0=background, 1=individual_tree, 2=group_of_trees)
-#         filename = os.path.basename(path)
-#         cv2.imwrite(os.path.join(output_dir, filename), pred * 127)  # multiply to visualize
+        # Save mask (0=background, 1=individual_tree, 2=group_of_trees)
+        filename = os.path.basename(path)
+        cv2.imwrite(os.path.join(output_dir, filename), pred * 127)  # multiply to visualize
 
 # -----------------------------
 # Helper: Load GT polygons from JSON
@@ -304,5 +215,5 @@ def evaluate_map(model, X_val, val_json_path, compute_map_fn, threshold=0.5):
     overall_map = np.mean(map_scores) if map_scores else 0.0
     return overall_map
 
-overall_map = evaluate_map(model, X_val, val_masks_path, compute_map_fn=compute_map, threshold=0.5)
-print("Initial mAP:", overall_map)
+# overall_map = evaluate_map(model, X_val, val_masks_path, compute_map_fn=compute_map, threshold=0.5)
+# print("Initial mAP:", overall_map)
