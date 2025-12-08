@@ -1,7 +1,7 @@
 Phase 0: data inspection
 
 training images: 3MB, resolution in 10cm x37, 20cm x38, 40cm x25, 60cm x25, 80cm x25
-Validation images: 3MB, resolution in 10cm x38, 20cm x37, 40cm x25, 60cm x 25, 80cm x25
+evaluation images: 3MB, resolution in 10cm x38, 20cm x37, 40cm x25, 60cm x 25, 80cm x25
 
 Images info:
 Driver: GTiff
@@ -49,4 +49,5 @@ classes:
 individual_tree
 group_of_trees
 
-Confidence score all 1 in training but not all 1 in validation.
+Confidence score all 1 in training but not all 1 in evaluation.
+That is because the labels in training data are correct ground truth, and the labels in evaluation are randomly generated as sample submission.
